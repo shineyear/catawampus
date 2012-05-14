@@ -24,6 +24,7 @@ class BrcmWifiTest(unittest.TestCase):
     self.old_WL_EXE = brcmwifi.WL_EXE
     brcmwifi.WL_EXE = 'testdata/brcmwifi/wlempty'
     brcmwifi.WL_SLEEP = 0
+    brcmwifi.WL_AUTOCHAN_SLEEP = 0
     self.old_PROC_NET_DEV = netdev.PROC_NET_DEV
     self.files_to_remove = list()
 
@@ -53,7 +54,7 @@ class BrcmWifiTest(unittest.TestCase):
       return False
 
   def VerifyCommonWlCommands(self, cmd, rmwep=0, wsec=0, primary_key=1,
-                             wpa_auth=0, sup_wpa=0, amode='open'):
+                             wpa_auth=0, sup_wpa=1, amode='open'):
     # Verify the number of "rmwep #" commands, and remove them.
     l = [x for x in cmd.split('\n') if x]  # Suppress blank lines
     for i in range(rmwep, 4):
@@ -63,9 +64,9 @@ class BrcmWifiTest(unittest.TestCase):
     self.assertTrue(self.RmFromList(l, 'wpa_auth %d' % wpa_auth))
     self.assertTrue(self.RmFromList(l, 'primary_key %d' % primary_key))
     self.assertTrue(len(l) >= 3)
-    self.assertEqual(l[0], '-i wifi0 ap 1')
-    self.assertEqual(l[1], '-i wifi0 bss down')
-    self.assertEqual(l[2], '-i wifi0 radio on')
+    self.assertEqual(l[0], '-i wifi0 radio on')
+    self.assertEqual(l[1], '-i wifi0 ap 1')
+    self.assertEqual(l[2], '-i wifi0 bss down')
     return l[3:]
 
   def testValidateExports(self):
@@ -155,6 +156,7 @@ class BrcmWifiTest(unittest.TestCase):
     output = out.read()
     out.close()
     outlist = self.VerifyCommonWlCommands(output)
+    self.assertTrue(self.RmFromList(outlist, 'up'))
     self.assertTrue(self.RmFromList(outlist, 'ssid myssid'))
     self.assertFalse(outlist)
 
@@ -362,8 +364,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.CommitTransaction()
     output = out.read()
     out.close()
-    self.assertEqual(output,
-                     '-i wifi0 ap 1\n-i wifi0 bss down\n-i wifi0 radio off\n')
+    self.assertEqual(output, '-i wifi0 radio off\n')
 
   def testNoEnable(self):
     (script, out) = self.MakeTestScript()
@@ -441,11 +442,13 @@ class BrcmWifiTest(unittest.TestCase):
     bw.RadioEnabled = 'True'
     bw.BasicEncryptionModes = 'None' # wsec 0
     bw.WPAEncryptionModes = 'TKIPEncryption'  # wsec 2
+    bw.WPAAuthenticationMode = 'PSKAuthentication'
     bw.IEEE11iEncryptionModes = 'AESEncryption'  # wsec 4
+    bw.IEEE11iAuthenticationMode = 'PSKAuthentication'
     bw.BeaconType = 'None'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=0)
+    outlist = self.VerifyCommonWlCommands(output, wsec=0, sup_wpa=0)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -453,7 +456,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'Basic'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=0)
+    outlist = self.VerifyCommonWlCommands(output, wsec=0, sup_wpa=0)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -462,7 +465,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'Basic'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=1)
+    outlist = self.VerifyCommonWlCommands(output, wsec=1, sup_wpa=0)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -472,7 +475,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'Basic'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=1)
+    outlist = self.VerifyCommonWlCommands(output, wsec=1, sup_wpa=0)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -480,7 +483,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'WPA'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=2)
+    outlist = self.VerifyCommonWlCommands(output, wsec=2, wpa_auth=4)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -488,15 +491,17 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = '11i'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=4)
+    outlist = self.VerifyCommonWlCommands(output, wsec=4, wpa_auth=128)
     self.assertFalse(outlist)
     out.truncate()
 
+    # NOTE(jnewlin): I do not believe we should support these beacon types
+    # below.
     bw.StartTransaction()
     bw.BeaconType = 'BasicandWPA'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=2)
+    outlist = self.VerifyCommonWlCommands(output, wsec=2, wpa_auth=4)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -504,7 +509,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'Basicand11i'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=4)
+    outlist = self.VerifyCommonWlCommands(output, wsec=4, wpa_auth=128)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -512,7 +517,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'WPAand11i'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=4)
+    outlist = self.VerifyCommonWlCommands(output, wsec=4, wpa_auth=128)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -520,7 +525,7 @@ class BrcmWifiTest(unittest.TestCase):
     bw.BeaconType = 'BasicandWPAand11i'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, wsec=4)
+    outlist = self.VerifyCommonWlCommands(output, wsec=4, wpa_auth=128)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -537,19 +542,35 @@ class BrcmWifiTest(unittest.TestCase):
     self.assertFalse(outlist)
     out.truncate()
 
+    # Test WEP
     bw.StartTransaction()
-    bw.IEEE11iAuthenticationMode = 'PSKAuthentication'
+    bw.BeaconType = 'Basic'
+    bw.BasicAuthenticationMode = 'None'
+    bw.BasicEncryptionModes = 'WEPEncryption'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, sup_wpa=1, wpa_auth=128)
+    outlist = self.VerifyCommonWlCommands(output, sup_wpa=0, wpa_auth=0, wsec=1)
+    self.assertFalse(outlist)
+
+    # Test WPA-TKIP
+    bw.StartTransaction()
+    bw.BeaconType = 'WPA'
+    bw.WPAAuthenticationMode = 'PSKAuthentication'
+    bw.WPAEncryptionModes = 'TKIPEncryption'
+    bw.CommitTransaction()
+    output = out.read()
+    outlist = self.VerifyCommonWlCommands(output, sup_wpa=1, wpa_auth=4, wsec=2)
     self.assertFalse(outlist)
     out.truncate()
 
+    # Test WPA2-AES
     bw.StartTransaction()
-    bw.WPAAuthenticationMode = 'PSKAuthentication'
+    bw.BeaconType = '11i'
+    bw.IEEE11iAuthenticationMode = 'PSKAuthentication'
+    bw.IEEE11iEncryptionModes = 'AESEncryption'
     bw.CommitTransaction()
     output = out.read()
-    outlist = self.VerifyCommonWlCommands(output, sup_wpa=1, wpa_auth=132)
+    outlist = self.VerifyCommonWlCommands(output, sup_wpa=1, wpa_auth=128, wsec=4)
     self.assertFalse(outlist)
     out.truncate()
 
@@ -632,6 +653,33 @@ class BrcmWifiTest(unittest.TestCase):
     bw.KeyPassphrase = 'testpassword'
     self.assertEqual(bw.KeyPassphrase, bw.PreSharedKeyList[1].KeyPassphrase)
 
+  def testAutoChannel(self):
+    (script, out) = self.MakeTestScript()
+    brcmwifi.WL_EXE = script.name
+    bw = brcmwifi.BrcmWifiWlanConfiguration('wifi0')
+    bw.StartTransaction()
+    bw.Enable = 'True'
+    bw.RadioEnabled = 'True'
+    bw.AutoChannelEnable = 'True'
+    out.truncate()
+    bw.CommitTransaction()
+    output = out.read()
+    out.close()
+    # AutoChannel changes the order of the initial commands
+    # slightly.
+    outlist = [x for x in output.split('\n') if x]
+    self.assertEqual(outlist[0], '-i wifi0 radio on')
+    self.assertEqual(outlist[1], '-i wifi0 ap 1')
+    self.assertEqual(outlist[2], '-i wifi0 down')
+    self.assertTrue(self.RmFromList(outlist, 'spect 0'))
+    self.assertTrue(self.RmFromList(outlist, 'mpc 0'))
+    self.assertTrue(self.RmFromList(outlist, 'up'))
+    self.assertTrue(self.RmFromList(outlist, 'ssid'))
+    self.assertTrue(self.RmFromList(outlist, 'autochannel 1'))
+    self.assertTrue(self.RmFromList(outlist, 'autochannel 2'))
+    self.assertTrue(self.RmFromList(outlist, 'down'))
+    self.assertTrue(self.RmFromList(outlist, 'mpc 1'))
+    self.assertTrue(self.RmFromList(outlist, 'spect 1'))
 
 if __name__ == '__main__':
   unittest.main()

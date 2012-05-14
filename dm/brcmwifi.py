@@ -44,6 +44,8 @@ EM_WAPI = 0x100  # Not enumerated in tr-98
 # Unit tests can override these.
 WL_EXE = '/usr/bin/wl'
 WL_SLEEP = 3  # Broadcom recommendation for 3 second sleep before final join.
+# Broadcom recommendation for delay while scanning for a channel
+WL_AUTOCHAN_SLEEP = 2
 
 # Parameter enumerations
 BEACONS = frozenset(['None', 'Basic', 'WPA', '11i', 'BasicandWPA',
@@ -114,6 +116,29 @@ class Wl(object):
       elif p3 is not None:
         sdict[p3.group(1).lower()] = '0'
     return sdict
+
+  def DoAutoChannelSelect(self):
+    """Run the AP through an auto channel selection."""
+    # Make sure the interface is up, and ssid is the empty string.
+    self._SubprocessCall(['down'])
+    self._SubprocessCall(['spect', '0'])
+    self._SubprocessCall(['mpc', '0'])
+    self._SubprocessCall(['up'])
+    self._SubprocessCall(['ssid', ''])
+    time.sleep(WL_SLEEP)
+    # This starts a scan, and we give it some time to complete.
+    # TODO(jnewlin): Chat with broadcom about how long we need/should
+    # wait before setting the autoscanned channel.
+    self._SubprocessCall(['autochannel', '1'])
+    time.sleep(WL_AUTOCHAN_SLEEP)
+    # This programs the channel with the best channel found during the
+    # scan.
+    self._SubprocessCall(['autochannel', '2'])
+    # Bring the interface back down and reset spect and mpc settings.
+    # spect can't be changed for 0 -> 1 unless the interface is down.
+    self._SubprocessCall(['down'])
+    self._SubprocessCall(['spect', '1'])
+    self._SubprocessCall(['mpc', '1'])
 
   def SetApMode(self):
     """Put device into AP mode."""
@@ -353,6 +378,7 @@ class Wl(object):
     return ''
 
   def SetSSID(self, value, cfgnum=None):
+    self._SubprocessCall(['up'])
     if cfgnum is not None:
       self._SubprocessCall(['ssid', '-C', str(cfgnum), value])
     else:
@@ -430,7 +456,6 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
     self.wl = Wl(ifname)
 
     # Unimplemented, but not yet evaluated
-    self.Unexport('AutoChannelEnable')
     self.Unexport('BeaconAdvertisementEnabled')
     self.Unexport('ChannelsInUse')
     self.Unexport('MaxBitRate')
@@ -483,6 +508,7 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
 
   def _GetDefaultSettings(self):
     obj = WifiConfig()
+    obj.p_auto_channel_enable = False
     obj.p_auto_rate_fallback_enabled = None
     obj.p_basic_authentication_mode = 'None'
     obj.p_basic_encryption_modes = 'WEPEncryption'
@@ -490,7 +516,7 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
     obj.p_bssid = None
     obj.p_channel = None
     obj.p_enable = False
-    obj.p_ieee11i_authentication_mode = None
+    obj.p_ieee11i_authentication_mode = 'PSKAuthentication'
     obj.p_ieee11i_encryption_modes = 'X_CATAWAMPUS-ORG_None'
     obj.p_radio_enabled = True
     obj.p_regulatory_domain = None
@@ -498,7 +524,7 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
     obj.p_ssid_advertisement_enabled = None
     obj.p_transmit_power = None
     obj.p_wepkeyindex = 1
-    obj.p_wpa_authentication_mode = None
+    obj.p_wpa_authentication_mode = 'PSKAuthentication'
     obj.p_wpa_encryption_modes = 'X_CATAWAMPUS-ORG_None'
     return obj
 
@@ -711,6 +737,15 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
   RegulatoryDomain = property(GetRegulatoryDomain, SetRegulatoryDomain, None,
                               'WLANConfiguration.RegulatoryDomain')
 
+  def GetAutoChannelEnable(self):
+    return self.config.p_auto_channel_enable
+
+  def SetAutoChannelEnable(self, value):
+    self.config.p_auto_channel_enable = tr.cwmpbool.parse(value)
+
+  AutoChannelEnable = property(GetAutoChannelEnable, SetAutoChannelEnable,
+                               None, 'WLANConfiguration.AutoChannelEnable')
+
   def GetSSID(self):
     return self.wl.GetSSID()
 
@@ -801,15 +836,15 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
     real wl utility.
     """
 
-    if not self.config.p_enable:
-      return
-    self.wl.SetApMode()
-    self.wl.SetBssStatus(False)
-    if self.config.p_radio_enabled is False:
+    if not self.config.p_enable or not self.config.p_radio_enabled:
       self.wl.SetRadioEnabled(False)
       return
 
     self.wl.SetRadioEnabled(True)
+    self.wl.SetApMode()
+    if self.config.p_auto_channel_enable:
+      self.wl.DoAutoChannelSelect()
+    self.wl.SetBssStatus(False)
     if self.config.p_auto_rate_fallback_enabled is not None:
       self.wl.SetAutoRateFallBackEnabled(
           self.config.p_auto_rate_fallback_enabled)
@@ -825,23 +860,38 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
     if self.config.p_transmit_power is not None:
       self.wl.SetTransmitPower(self.config.p_transmit_power)
 
+    # sup_wpa should only be set WPA/WPA2 modes, not for Basic.
+    sup_wpa = False
+    amode = 0
     if self.config.p_beacon_type.find('11i') >= 0:
       crypto = self.wl.EM_StringToBitmap(self.config.p_ieee11i_encryption_modes)
+      if crypto != EM_NONE:
+        amode = 128
+      sup_wpa = True
     elif self.config.p_beacon_type.find('WPA') >= 0:
       crypto = self.wl.EM_StringToBitmap(self.config.p_wpa_encryption_modes)
+      if crypto != EM_NONE:
+        amode = 4
+      sup_wpa = True
     elif self.config.p_beacon_type.find('Basic') >= 0:
       crypto = self.wl.EM_StringToBitmap(self.config.p_basic_encryption_modes)
     else:
       crypto = EM_NONE
     self.wl.SetEncryptionModes(crypto)
-
-    sup_wpa = False
-    if self.config.p_wpa_authentication_mode:
-      sup_wpa = True
-    if self.config.p_ieee11i_authentication_mode:
-      sup_wpa = True
     self.wl.SetSupWpa(sup_wpa)
+    self.wl.SetWpaAuth(amode)
 
+    for idx, psk in self.PreSharedKeyList.items():
+      key = psk.GetKey(self.config.p_ssid)
+      if key:
+        self.wl.SetPMK(key)
+
+    if self.config.p_ssid is not None:
+      time.sleep(WL_SLEEP)
+      self.wl.SetSSID(self.config.p_ssid)
+
+    # Setting WEP key has to come after setting SSID. (Doesn't make sense
+    # to me, it just doesn't work if you do it before setting SSID.)
     for idx, wep in self.WEPKeyList.items():
       key = wep.WEPKey
       if key is None:
@@ -849,22 +899,6 @@ class BrcmWifiWlanConfiguration(BASE98WIFI):
       else:
         self.wl.SetWepKey(idx-1, key)
     self.wl.SetWepKeyIndex(self.config.p_wepkeyindex)
-
-    for idx, psk in self.PreSharedKeyList.items():
-      key = psk.GetKey(self.config.p_ssid)
-      if key:
-        self.wl.SetPMK(key)
-
-    amode = 0
-    if self.config.p_ieee11i_authentication_mode == 'PSKAuthentication':
-      amode |= 128
-    if self.config.p_wpa_authentication_mode == 'PSKAuthentication':
-      amode |= 4
-    self.wl.SetWpaAuth(amode)
-
-    if self.config.p_ssid is not None:
-      time.sleep(WL_SLEEP)
-      self.wl.SetSSID(self.config.p_ssid)
 
   def GetTotalBytesReceived(self):
     # TODO(dgentry) cache for lifetime of session
