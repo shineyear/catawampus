@@ -23,27 +23,94 @@ __author__ = 'apenwarr@google.com (Avery Pennarun)'
 
 import binascii
 import collections
+import datetime
+import os
 import random
 import socket
+import sys
 import time
 import urllib
 
 from curtain import digest
 import tornado.httpclient
 import tornado.ioloop
+import tornado.util
 import tornado.web
 
 import api_soap
 import cpe_management_server
 import cwmp_session
-import soap
+import helpers
 
 PROC_IF_INET6 = '/proc/net/if_inet6'
+MAX_EVENT_QUEUE_SIZE = 64
+
+
+def _Shorten(s, prefixofs, suffixofs, maxlen):
+  """Shorten the given string if its length is >= maxlen.
+
+  Note: maxlen should generally be considerably bigger than
+  prefixofs + suffixofs.  It's disconcerting to a reader when
+  you have a "..." to replace 10 bytes, but it feels fine when the
+  "..." replaces 500 bytes.
+
+  Args:
+    s: the string to shorten.
+    prefixofs: the number of chars to keep at the beginning of s.
+    suffixofs: the number of chars to keep at the end of s.
+    maxlen: if the string is longer than this, shorten it.
+  Returns:
+    A shortened version of the string.
+  """
+  s = str(s)
+  if len(s) >= maxlen and not os.environ.get('DONT_SHORTEN'):
+    # When the string exceeds the limit, we deliberately shorten it to
+    # considerably less than the limit, because it's disconcerting when
+    # you have a "..." to replace 10 bytes, but it feels right when the
+    # "..." replaces 500 bytes.
+    s = s[0:prefixofs] + '\n........\n' + s[-suffixofs:]
+  return s
+
+
+class LimitDeque(collections.deque):
+  """Wrapper around a deque that limits the maximimum size.
+
+  If the maximum size is reached, call the supplied handler, or
+  exit if no handler is provided.
+  """
+
+  def __init__(self, max_size=None, handler=None):
+    collections.deque.__init__(self)
+    self.max_size = max_size
+    self.handler = handler
+
+  def CheckSize(self):
+    if self.max_size and len(self) > self.max_size:
+      if self.handler:
+        self.handler()
+      else:
+        print 'Maximum length of deque (%d) was exceeded' % (self.max_size)
+        sys.exit(1)
+
+  def append(self, *args):
+    collections.deque.append(self, *args)
+    self.CheckSize()
+
+  def appendleft(self, *args):
+    collections.deque.appendleft(self, *args)
+    self.CheckSize()
+
+  def extend(self, *args):
+    collections.deque.extend(self, *args)
+    self.CheckSize()
+
+  def extendleft(self, *args):
+    collections.deque.extendleft(self, *args)
+    self.CheckSize()
 
 
 # SPEC3 = TR-069_Amendment-3.pdf
 # http://www.broadband-forum.org/technical/download/TR-069_Amendment-3.pdf
-
 def SplitUrl(url):
   Url = collections.namedtuple('Url', ('method host port path'))
   method, rest = urllib.splittype(url)
@@ -60,8 +127,7 @@ class PingHandler(digest.DigestAuthMixin, tornado.web.RequestHandler):
     cpe_ms: the cpe_management_server object, from which to retrieve
       username and password.
   """
-  # TODO $SPEC3 3.2.2 "The CPE SHOULD restrict the number of Connection
-  #   Requests it accepts during a given period of time..."
+
   def initialize(self, callback, cpe_ms):
     self.callback = callback
     self.cpe_ms = cpe_ms
@@ -99,21 +165,22 @@ class CPEStateMachine(object):
     ip: local ip address to bind to. If None, find address automatically.
     cpe: the api_soap.cpe object for this device
     listenport: the port number to listen on for ACS ping requests.
-    acs_url_file: A file which will contain the ACS URL. This file can
-      change during operation, and must be periodically re-read.
+    acs_url: An ACS URL to use. This overrides platform_config.GetAcsUrl()
     ping_path: URL path for the ACS Ping function
     ping_ip6dev: ifname to use for the CPE Ping address.
     fetch_args: kwargs to pass to HTTPClient.fetch
   """
-  def __init__(self, ip, cpe, listenport, acs_url_file, ping_path,
-               ping_ip6dev=None, fetch_args=dict(), ioloop=None):
+
+  def __init__(self, ip, cpe, listenport, platform_config, ping_path,
+               acs_url=None, ping_ip6dev=None, fetch_args=dict(), ioloop=None,
+               restrict_acs_hosts=None):
     self.cpe = cpe
     self.cpe_soap = api_soap.CPE(self.cpe)
     self.encode = api_soap.Encode()
     self.outstanding = None
     self.response_queue = []
     self.request_queue = []
-    self.event_queue = collections.deque()
+    self.event_queue = LimitDeque(MAX_EVENT_QUEUE_SIZE, self.EventQueueHandler)
     self.ioloop = ioloop or tornado.ioloop.IOLoop.instance()
     self.retry_count = 0  # for Inform.RetryCount
     self.start_session_timeout = None  # timer for CWMPRetryInterval
@@ -122,12 +189,22 @@ class CPEStateMachine(object):
     self.ping_ip6dev = ping_ip6dev
     self.fetch_args = fetch_args
     self.rate_limit_seconds = 60
+    self.platform_config = platform_config
     self.previous_ping_time = 0
     self.ping_timeout_pending = None
+    self._changed_parameters = set()
+    self._changed_parameters_sent = set()
     self.cpe_management_server = cpe_management_server.CpeManagementServer(
-        acs_url_file=acs_url_file, port=listenport, ping_path=ping_path,
-        get_parameter_key=cpe.getParameterKey,
-        start_periodic_session=self.NewPeriodicSession, ioloop=self.ioloop)
+        acs_url=acs_url, platform_config=platform_config, port=listenport,
+        ping_path=ping_path, get_parameter_key=cpe.getParameterKey,
+        start_periodic_session=self.NewPeriodicSession, ioloop=self.ioloop,
+        restrict_acs_hosts=restrict_acs_hosts)
+
+  def EventQueueHandler(self):
+    """Called if the event queue goes beyond the maximum threshold."""
+    print 'Event queue has grown beyond the maximum size, restarting...'
+    print 'event_queue=%s' % (str(self.event_queue))
+    sys.exit(1)
 
   def GetManagementServer(self):
     """Return the ManagementServer implementation for tr-98/181."""
@@ -178,7 +255,7 @@ class CPEStateMachine(object):
     s.setblocking(0)
     try:
       s.connect((host, port or 1))  # port doesn't matter, but can't be 0
-    except socket.error, e:
+    except socket.error:
       pass
     return s.getsockname()[0]
 
@@ -198,10 +275,6 @@ class CPEStateMachine(object):
       parameter_list += [
           ('InternetGatewayDevice.ManagementServer.ConnectionRequestURL',
            ms.ConnectionRequestURL),
-          ('InternetGatewayDevice.ManagementServer.ConnectionRequestUsername',
-           ms.ConnectionRequestUsername),
-          ('InternetGatewayDevice.ManagementServer.ConnectionRequestPassword',
-           ms.ConnectionRequestPassword),
           ('InternetGatewayDevice.ManagementServer.ParameterKey',
            ms.ParameterKey),
           ('InternetGatewayDevice.DeviceInfo.HardwareVersion',
@@ -210,6 +283,21 @@ class CPEStateMachine(object):
            di.SoftwareVersion),
           ('InternetGatewayDevice.DeviceInfo.SpecVersion', di.SpecVersion),
       ]
+      # NOTE(jnewlin): Changed parameters can be set to be sent either
+      # explicitly with a value change event, or to be sent with the
+      # periodic inform.  So it's not a bug if there is no value change
+      # event in the event queue.
+
+      # Take all of the parameters and put union them with the another
+      # set that has been previously sent.  When we receive an inform
+      # from the ACS we clear the _sent version.  This fixes a bug where
+      # we send this list of params to the ACS, followed by a PerioidStat
+      # adding itself to the list here, followed by getting an ack from the
+      # ACS where we clear the list.  Now we just clear the list of the
+      # params that was sent when the ACS acks.
+      self._changed_parameters_sent.update(self._changed_parameters)
+      self._changed_parameters.clear()
+      parameter_list += self._changed_parameters_sent
     except (AttributeError, KeyError):
       pass
     req = self.encode.Inform(root=self.cpe.root, events=events,
@@ -243,20 +331,26 @@ class CPEStateMachine(object):
   def Run(self):
     print 'RUN'
     if not self.session:
-      print('No ACS session, returning.')
+      print 'No ACS session, returning.'
       return
     if not self.session.acs_url:
-      print('No ACS URL populated, returning.')
+      print 'No ACS URL populated, returning.'
       self._ScheduleRetrySession(wait=60)
       return
     if self.session.should_close():
-      print('Idle CWMP session, terminating.')
+      print 'Idle CWMP session, terminating.'
       self.outstanding = None
-      if self.session.close():
-        # Ping received during session, start another
-        self._NewPingSession()
+      ping_received = self.session.close()
+      self.platform_config.AcsAccessSuccess(self.session.acs_url)
       self.session = None
       self.retry_count = 0  # Successful close
+      if self._changed_parameters:
+        # Some values triggered during the prior session, start a new session
+        # with those changed params.  This should also satisfy a ping.
+        self.NewValueChangeSession()
+      elif ping_received:
+        # Ping received during session, start another
+        self._NewPingSession()
       return
 
     if self.outstanding is not None:
@@ -277,11 +371,12 @@ class CPEStateMachine(object):
     else:
       # Empty message
       self.session.state_update(cpe_to_acs_empty=True)
+    self.platform_config.AcsAccessAttempt(self.session.acs_url)
     print('CPE POST (at {0!s}):\n'
           'ACS URL: {1!r}\n'
           '{2!s}\n'
           '{3!s}'.format(time.ctime(), self.session.acs_url,
-                         headers, self.outstanding))
+                         headers, _Shorten(self.outstanding, 768, 256, 2048)))
     req = tornado.httpclient.HTTPRequest(
         url=self.session.acs_url, method='POST', headers=headers,
         body=self.outstanding, follow_redirects=True, max_redirects=5,
@@ -299,7 +394,7 @@ class CPEStateMachine(object):
       cookies = response.headers.get_list('Set-Cookie')
       if cookies:
         self.session.cookies = cookies
-      print response.body
+      print _Shorten(response.body, 768, 256, 2048)
       if response.body:
         out = self.cpe_soap.Handle(response.body)
         if out is not None:
@@ -308,7 +403,7 @@ class CPEStateMachine(object):
       else:
         self.session.state_update(acs_to_cpe_empty=True)
     else:
-      print('HTTP ERROR {0!s}: {1}'.format(response.code, response.error))
+      print 'HTTP ERROR {0!s}: {1}'.format(response.code, response.error)
       self._ScheduleRetrySession()
     self.Run()
     return 200
@@ -317,7 +412,7 @@ class CPEStateMachine(object):
     """Start a timer to retry a CWMP session.
 
     Args:
-      wait - number of seconds to wait. If wait=None, choose a random wait
+      wait: Number of seconds to wait. If wait=None, choose a random wait
         time according to $SPEC3 section 3.2.1
     """
     if self.session:
@@ -326,9 +421,8 @@ class CPEStateMachine(object):
     if wait is None:
       self.retry_count += 1
       wait = self.cpe_management_server.SessionRetryWait(self.retry_count)
-    timeout = time.time() + wait
     self.start_session_timeout = self.ioloop.add_timeout(
-        timeout, self._SessionWaitTimer)
+        datetime.timedelta(seconds=wait), self._SessionWaitTimer)
 
   def _SessionWaitTimer(self):
     """Handler for the CWMP Retry timer, to start a new session."""
@@ -365,7 +459,7 @@ class CPEStateMachine(object):
 
     # Rate limit how often new sessions can be started with ping to
     # once a minute
-    current_time = time.time()
+    current_time = helpers.monotime()
     elapsed_time = current_time - self.previous_ping_time
     allow_ping = (elapsed_time < 0 or
                   elapsed_time > self.rate_limit_seconds)
@@ -379,7 +473,8 @@ class CPEStateMachine(object):
       if callback_time < 1:
         callback_time = 1
       self.ping_timeout_pending = self.ioloop.add_timeout(
-        current_time + callback_time, self._NewTimeoutPingSession)
+          datetime.timedelta(seconds=callback_time),
+          self._NewTimeoutPingSession)
 
   def NewPeriodicSession(self):
     # If the ACS stops responding for some period of time, it's possible
@@ -387,6 +482,34 @@ class CPEStateMachine(object):
     # In this case, don't start the new inform, wait for the session
     # retry.  The retry has a maximum timer of periodic session.
     reason = '2 PERIODIC'
+    if not (reason, None) in self.event_queue:
+      self._NewSession(reason)
+
+  def SetNotificationParameters(self, parameters):
+    """Set the list of parameters that have changed.
+
+    The list of parameters that have triggered and should be sent either
+    with the next periodic inform, or the next active active value change
+    session.
+
+    Args:
+      parameters: An array of the parameters that have changed, these
+      need to be sent to the ACS in the parameter list.
+    """
+    for param in parameters:
+      self._changed_parameters.add(param)
+
+  def NewValueChangeSession(self):
+    """Start a new session to the ACS for the parameters that have changed."""
+
+    # If all the changed parameters have been reported, or there is already
+    # a session running, don't do anything.  The run loop for the session
+    # will autmatically kick off a new session if there are new changed
+    # parameters.
+    if not self._changed_parameters or self.session:
+      return
+
+    reason = '4 VALUE CHANGE'
     if not (reason, None) in self.event_queue:
       self._NewSession(reason)
 
@@ -398,7 +521,7 @@ class CPEStateMachine(object):
     """Return a new deque which removes events in rmset."""
     newdq = collections.deque()
     for event in dq:
-      (reason, command_key) = event
+      (reason, unused_command_key) = event
       if reason.lower() not in rmset:
         newdq.append(event)
     return newdq
@@ -416,6 +539,7 @@ class CPEStateMachine(object):
                          '6 connection request', '8 diagnostics complete',
                          'm reboot', 'm scheduleinform'])
     self.event_queue = self._RemoveFromDequeue(self.event_queue, reasons)
+    self._changed_parameters_sent.clear()
 
   def Startup(self):
     rb = self.cpe.download_manager.RestoreReboots()
@@ -423,20 +547,24 @@ class CPEStateMachine(object):
       self.event_queue.extend(rb)
     # TODO(dgentry) Check whether we have a config, send '1 BOOT' instead
     self._NewSession('0 BOOTSTRAP')
-    # This will call SendTransferComplete, so we have to already be in a session.
+    # This will call SendTransferComplete, so we have to already be in
+    # a session.
     self.cpe.startup()
 
 
-def Listen(ip, port, ping_path, acs, acs_url_file, cpe, cpe_listener,
-           ping_ip6dev=None, fetch_args=dict(), ioloop=None):
+def Listen(ip, port, ping_path, acs, cpe, cpe_listener, platform_config,
+           acs_url=None, ping_ip6dev=None, fetch_args=dict(), ioloop=None,
+           restrict_acs_hosts=None):
   if not ping_path:
     ping_path = '/ping/%x' % random.getrandbits(120)
   while ping_path.startswith('/'):
     ping_path = ping_path[1:]
   cpe_machine = CPEStateMachine(ip=ip, cpe=cpe, listenport=port,
-                                acs_url_file=acs_url_file, ping_path=ping_path,
-                                ping_ip6dev=ping_ip6dev, fetch_args=fetch_args,
-                                ioloop=ioloop)
+                                platform_config=platform_config,
+                                ping_path=ping_path,
+                                restrict_acs_hosts=restrict_acs_hosts,
+                                acs_url=acs_url, ping_ip6dev=ping_ip6dev,
+                                fetch_args=fetch_args, ioloop=ioloop)
   cpe.setCallbacks(cpe_machine.SendTransferComplete,
                    cpe_machine.TransferCompleteReceived,
                    cpe_machine.InformResponseReceived)
@@ -457,15 +585,3 @@ def Listen(ip, port, ping_path, acs, acs_url_file, cpe, cpe_listener,
   webapp = tornado.web.Application(handlers)
   webapp.listen(port)
   return cpe_machine
-
-
-def main():
-  with soap.Envelope(1234, False) as xml:
-    soap.GetParameterNames(xml, '', True)
-    #xml.GetRPCMethods(None)
-  print 'Response:'
-  print SyncClient('http://localhost:7547/cpe', xml)
-
-
-if __name__ == '__main__':
-  main()

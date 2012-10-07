@@ -25,6 +25,7 @@ import sys
 import google3
 import dm.device_info
 import dm.igd_time
+import dm.periodic_statistics
 import dm.storage
 import platform_config
 import tornado.ioloop
@@ -40,11 +41,27 @@ BASE98IGD = tr.tr098_v1_4.InternetGatewayDevice_v1_10.InternetGatewayDevice
 class PlatformConfig(platform_config.PlatformConfigMeta):
   """PlatformConfig for FakeCPE."""
 
+  def __init__(self, ioloop=None):
+    platform_config.PlatformConfigMeta.__init__(self)
+
   def ConfigDir(self):
     return '/tmp/catawampus.%s/config/' % FakeCPEInstance()
 
   def DownloadDir(self):
     return '/tmp/catawampus.%s/download/' % FakeCPEInstance()
+
+  def GetAcsUrl(self):
+    """FakeCPE requires a --acs_url parameter, there is no platform handling."""
+    return None
+
+  def SetAcsUrl(self, url):
+    raise AttributeError('URL is read-only')
+
+  def AcsAccessAttempt(self, url):
+    pass
+
+  def AcsAccessSuccess(self, url):
+    pass
 
 
 class InstallerFakeCPE(tr.download.Installer):
@@ -144,28 +161,34 @@ class ServicesFakeCPE(tr181.Device_v2_2.Device.Services):
 class DeviceFakeCPE(tr181.Device_v2_2.Device):
   """Device implementation for a simulated CPE device."""
 
-  def __init__(self, device_id):
+  def __init__(self, device_id, periodic_stats):
     super(DeviceFakeCPE, self).__init__()
     self.Unexport(objects='ATM')
     self.Unexport(objects='Bridging')
     self.Unexport(objects='CaptivePortal')
     self.Export(objects=['DeviceInfo'])
     self.Unexport(objects='DHCPv4')
+    self.Unexport(objects='DHCPv6')
     self.Unexport(objects='DNS')
     self.Unexport(objects='DSL')
+    self.Unexport(objects='DSLite')
     self.Unexport(objects='Ethernet')
+    self.Unexport(objects='Firewall')
     self.Unexport(objects='GatewayInfo')
     self.Unexport(objects='HPNA')
     self.Unexport(objects='HomePlug')
     self.Unexport(objects='Hosts')
     self.Unexport(objects='IEEE8021x')
     self.Unexport(objects='IP')
+    self.Unexport(objects='IPv6rd')
     self.Unexport(objects='LANConfigSecurity')
     self.Unexport(objects='MoCA')
     self.Unexport(objects='NAT')
+    self.Unexport(objects='NeighborDiscovery')
     self.Unexport(objects='PPP')
     self.Unexport(objects='PTM')
     self.Unexport(objects='QoS')
+    self.Unexport(objects='RouterAdvertisement')
     self.Unexport(objects='Routing')
     self.Unexport(objects='SmartCardReaders')
     self.Unexport(objects='UPA')
@@ -180,10 +203,15 @@ class DeviceFakeCPE(tr181.Device_v2_2.Device):
     self.InterfaceStackNumberOfEntries = 0
     self.InterfaceStackList = {}
 
+    self.Export(objects=['PeriodicStatistics'])
+    self.PeriodicStatistics = periodic_stats
+
 
 class InternetGatewayDeviceFakeCPE(BASE98IGD):
-  def __init__(self, device_id):
-    BASE98IGD.__init__(self)
+  """Implements tr-98 InternetGatewayDevice."""
+
+  def __init__(self, device_id, periodic_stats):
+    super(InternetGatewayDeviceFakeCPE, self).__init__()
     self.Unexport(objects='CaptivePortal')
     self.Unexport(objects='DeviceConfig')
     self.Unexport(params='DeviceSummary')
@@ -205,6 +233,8 @@ class InternetGatewayDeviceFakeCPE(BASE98IGD):
     self.DeviceInfo = dm.device_info.DeviceInfo98Linux26(device_id)
     tzfile = '/tmp/catawampus.%s/TZ' % FakeCPEInstance()
     self.Time = dm.igd_time.TimeTZ(tzfile=tzfile)
+    self.Export(objects=['PeriodicStatistics'])
+    self.PeriodicStatistics = periodic_stats
 
   @property
   def LANDeviceNumberOfEntries(self):
@@ -216,21 +246,25 @@ class InternetGatewayDeviceFakeCPE(BASE98IGD):
 
 
 def PlatformInit(name, device_model_root):
+  """Create platform-specific device models and initialize platform."""
   tr.download.INSTALLER = InstallerFakeCPE
   params = list()
   objects = list()
+  periodic_stats = dm.periodic_statistics.PeriodicStatistics()
   devid = DeviceIdFakeCPE()
-  device_model_root.Device = DeviceFakeCPE(devid)
+  device_model_root.Device = DeviceFakeCPE(devid, periodic_stats)
   objects.append('Device')
-  device_model_root.InternetGatewayDevice = InternetGatewayDeviceFakeCPE(devid)
+  device_model_root.InternetGatewayDevice = InternetGatewayDeviceFakeCPE(
+      devid, periodic_stats)
   objects.append('InternetGatewayDevice')
   return (params, objects)
 
 
 def main():
+  periodic_stats = dm.periodic_statistics.PeriodicStatistics()
   devid = DeviceIdFakeCPE()
-  device = DeviceFakeCPE(devid)
-  igd = InternetGatewayDeviceFakeCPE(devid)
+  device = DeviceFakeCPE(devid, periodic_stats)
+  igd = InternetGatewayDeviceFakeCPE(devid, periodic_stats)
   tr.core.Dump(device)
   tr.core.Dump(igd)
   device.ValidateExports()

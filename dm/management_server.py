@@ -52,7 +52,7 @@ class ManagementServer181(BASEMGMT181):
     Args:
       mgmt: the real management configuration object.
     """
-    BASEMGMT181.__init__(self)
+    super(ManagementServer181, self).__init__()
     self.mgmt = mgmt
 
     self.Unexport('DownloadProgressURL')
@@ -69,6 +69,15 @@ class ManagementServer181(BASEMGMT181):
     self.ManageableDeviceList = {}
     self.ManageableDeviceNumberOfEntries = 0
 
+  def StartTransaction(self):
+    self.mgmt.StartTransaction()
+
+  def AbandonTransaction(self):
+    self.mgmt.AbandonTransaction()
+
+  def CommitTransaction(self):
+    self.mgmt.CommitTransaction()
+
   @property
   def STUNEnable(self):
     return False
@@ -81,13 +90,13 @@ class ManagementServer181(BASEMGMT181):
     if name in self.MGMTATTRS:
       return getattr(self.mgmt, name)
     else:
-      raise AttributeError
+      raise KeyError('No such attribute %s' % name)
 
   def __setattr__(self, name, value):
     if name in self.MGMTATTRS:
-      return setattr(self.mgmt, name, value)
+      setattr(self.mgmt, name, value)
     else:
-      return BASEMGMT181.__setattr__(self, name, value)
+      BASEMGMT181.__setattr__(self, name, value)
 
   def __delattr__(self, name):
     if name in self.MGMTATTRS:
@@ -115,24 +124,55 @@ class ManagementServer98(BASEMGMT98):
     Args:
       mgmt: the real management configuration object.
     """
-    BASEMGMT98.__init__(self)
+    super(ManagementServer98, self).__init__()
     self.mgmt = mgmt
+    self.Unexport('AliasBasedAddressing')
+    self.Unexport('AutoCreateInstances')
     self.Unexport('DownloadProgressURL')
+    self.Unexport('InstanceMode')
     self.Unexport('KickURL')
+    self.Unexport('ManageableDeviceNotificationLimit')
+    self.Unexport('NATDetected')
+    self.Unexport('STUNEnable')
+    self.Unexport('STUNMaximumKeepAlivePeriod')
+    self.Unexport('STUNMinimumKeepAlivePeriod')
+    self.Unexport('STUNPassword')
+    self.Unexport('STUNServerAddress')
+    self.Unexport('STUNServerPort')
+    self.Unexport('STUNUsername')
     self.Unexport('UDPConnectionRequestAddress')
+    self.Unexport('UDPConnectionRequestAddressNotificationLimit')
 
+    self.EmbeddedDeviceList = {}
     self.ManageableDeviceList = {}
-    self.ManageableDeviceNumberOfEntries = 0
+    self.VirtualDeviceList = {}
+
+  def StartTransaction(self):
+    self.mgmt.StartTransaction()
+
+  def AbandonTransaction(self):
+    self.mgmt.AbandonTransaction()
+
+  def CommitTransaction(self):
+    self.mgmt.CommitTransaction()
+
+  @property
+  def ManageableDeviceNumberOfEntries(self):
+    return 0
 
   @property
   def UpgradesManaged(self):
     return True
 
+  @property
+  def VirtualDeviceNumberOfEntries(self):
+    return 0
+
   def __getattr__(self, name):
     if name in self.MGMTATTRS:
       return getattr(self.mgmt, name)
     else:
-      raise AttributeError
+      raise KeyError('No such attribute %s' % name)
 
   def __setattr__(self, name, value):
     if name in self.MGMTATTRS:

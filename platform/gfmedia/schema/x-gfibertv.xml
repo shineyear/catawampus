@@ -19,8 +19,53 @@
              spec="urn:google-com:x-gfibertv-1-0">
 <import file="tr-069-biblio.xml" spec="urn:broadband-forum-org:tr-069-biblio"/>
   <model name="X_GOOGLE-COM_GFIBERTV:1.0" isService="true">
+
     <object name="X_GOOGLE_COM_GFIBERTV." access="readOnly" minEntries="1" maxEntries="1">
       <description>Container for parameters supporting the Google Fiber TV system.</description>
+      <parameter name="DevicePropertiesNumberOfEntries" access="readOnly">
+        <description>Number of instances of {{object|DeviceProperties}}.</description>
+        <syntax>
+          <unsignedInt/>
+        </syntax>
+      </parameter>
+      <parameter name="BtDevices" access="readWrite">
+        <description>The bluetooth devices config.</description>
+        <syntax>
+          <string/>
+        </syntax>
+      </parameter>
+      <parameter name="BtHHDevices" access="readWrite">
+        <description>The bluetooth HH devices config.</description>
+        <syntax>
+          <string/>
+        </syntax>
+      </parameter>
+      <parameter name="BtConfig" access="readWrite">
+        <description>The bluetooth device config.</description>
+        <syntax>
+          <string/>
+        </syntax>
+      </parameter>
+      <parameter name="BtNoPairing" access="readWrite">
+        <description>Creates a file that will prevent the device from pairing with the remote control over bluetooth, which effectively forces IR mode.</description>
+        <syntax>
+          <string/>
+        </syntax>
+      </parameter>
+      <object name="DeviceProperties.{i}." access="readWrite" numEntriesParameter="DevicePropertiesNumberOfEntries" minEntries="0" maxEntries="16">
+        <parameter name="SerialNumber" access="readWrite">
+          <description>Serial number of the device.</description>
+          <syntax>
+            <string/>
+          </syntax>
+        </parameter>
+        <parameter name="NickName" access="readWrite">
+          <description>Nickname of the device.</description>
+          <syntax>
+            <string/>
+          </syntax>
+        </parameter>
+      </object>
     </object>
     <object name="X_GOOGLE_COM_GFIBERTV.Mailbox." access="readOnly" minEntries="1" maxEntries="1">
       <description>Mailbox to access properties from the Google Fiber TV system.</description>
@@ -44,12 +89,6 @@
       </parameter>
       <parameter name="NodeList" access="readOnly">
         <description>Available Nodes, i.e. the serial numbers of all connected GFHD100 devices.</description>
-        <syntax>
-          <string/>
-        </syntax>
-      </parameter>
-      <parameter name="PropertyList" access="readOnly">
-        <description>Available properties on {Node}.</description>
         <syntax>
           <string/>
         </syntax>

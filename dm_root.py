@@ -25,7 +25,6 @@ import google3
 import dm.catawampus
 import dm.management_server
 import tr.core
-import traceroute
 
 
 def _RecursiveImport(name):
@@ -43,15 +42,13 @@ class DeviceModelRoot(tr.core.Exporter):
                                                    device_model_root=self)
     else:
       (params, objects) = (list(), list())
-    self.TraceRoute = traceroute.TraceRoute(loop)
-    objects.append('TraceRoute')
     self.X_CATAWAMPUS_ORG_CATAWAMPUS = dm.catawampus.CatawampusDm()
     objects.append('X_CATAWAMPUS-ORG_CATAWAMPUS')
     self.Export(params=params, objects=objects)
 
-  def get_platform_config(self):
+  def get_platform_config(self, ioloop):
     """Return the platform_config.py object for this platform."""
-    return self.device.PlatformConfig()
+    return self.device.PlatformConfig(ioloop=ioloop)
 
   def add_management_server(self, mgmt):
     # tr-181 Device.ManagementServer
@@ -67,3 +64,23 @@ class DeviceModelRoot(tr.core.Exporter):
       ms98.ManagementServer = dm.management_server.ManagementServer98(mgmt)
     except (AttributeError, KeyError):
       pass  # no tr-98 for this platform
+
+  def configure_tr157(self, cpe):
+    """Adds the cpe and root objects to the tr157 periodic stat object."""
+    BASE157PS_IGD = 'InternetGatewayDevice.PeriodicStatistics'
+    tr157_object = None
+    try:
+      tr157_object = self.GetExport(BASE157PS_IGD)
+      tr157_object.SetCpe(cpe)
+      tr157_object.SetRoot(self)
+    except (AttributeError, KeyError):
+      pass  # no tr-157 object on the InternetGatewayDevice.
+
+    # Check on the Device object.
+    BASE157PS_DEV = 'Device.PeriodicStatistics'
+    try:
+      tr157_object = self.GetExport(BASE157PS_DEV)
+      tr157_object.SetCpe(cpe)
+      tr157_object.SetRoot(self)
+    except (AttributeError, KeyError):
+      pass  # no tr-157 object found on the Device object.
